@@ -1,0 +1,180 @@
+---
+title: "Presentation"
+author: "Alex Tryforos"
+date: "12/2/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Introduction
+Concrete is the most important material in civil engineering. Consequently, the strength of concrete is highly important to its performance. Concrete compressive strength is a highly nonlinear function of age and 
+ingredients. These ingredients include cement, blast furnace slag, fly ash, 
+water, superplasticizer, coarse aggregate, and fine aggregate.
+<br><br>
+I will be using these ingredients and the age of the concrete to predict its strength.
+<br><br><br>
+
+#Data
+Given is the variable name, variable type, the measurement unit and a brief description. The order of this listing corresponds to the order of numerals along the rows of the database. 
+<br><br>
+**Name** -- Data Type -- Measurement -- Description
+<br><br><br>
+**Cement** (component 1) -- quantitative -- kg in a m3 mixture -- Input Variable
+<br>
+**Blast Furnace Slag** (component 2) -- quantitative -- kg in a m3 mixture -- Input Variable
+<br>
+**Fly Ash** (component 3) -- quantitative -- kg in a m3 mixture -- Input Variable
+<br>
+**Water** (component 4) -- quantitative -- kg in a m3 mixture -- Input Variable
+<br>
+**Superplasticizer** (component 5) -- quantitative -- kg in a m3 mixture -- Input Variable
+<br>
+**Coarse Aggregate** (component 6) -- quantitative -- kg in a m3 mixture -- Input Variable
+<br>
+**Fine Aggregate** (component 7) -- quantitative -- kg in a m3 mixture -- Input Variable
+<br>
+**Age** -- quantitative -- Day (1~365) -- Input Variable
+<br><br>
+**Concrete compressive strength** -- quantitative -- MPa -- Output Variable 
+<br><br><br>
+Data has 1030 observations and is sourced from Kaggle.
+```{r message=FALSE,warning=FALSE}
+library(neuralnet) #neural network package
+library(rpart) #decision tree package
+#import data
+concrete=read.csv("Concrete_Data.csv",header=TRUE)
+#Checking Histograms
+for (i in 1:9) {
+    hist(concrete[,i],main=paste("Histogram of", colnames(concrete)[i]), xlab = paste(colnames(concrete)[i]))
+}
+#Checking scatterplots
+for (i in 1:8) {
+    plot(concrete[,i], concrete$Strength,main=paste("Correlation of", colnames(concrete)[i], "with Strength"),ylab="Strength", xlab = paste(colnames(concrete)[i]))
+}
+summary(concrete)
+```
+A few things I notice from exploring the data is that strength (the response) appears normally distributed, thus using a squared loss function and predicting the mean is beneficial (also: the gradient descent algorithm prefers a squared loss function since it is differentiable).
+<br><br>
+Blast Furnace Slag, Fly Ash, Superplasticizer, and Age all have a large proportion of observations that are at or near 0.
+<br><br>
+While the scatterplots are simply observational correlation between each predictor and the response, thus **no** interaction is being considered, Fly Ash & Water appear to be negatively correlated with strength. Additionally, cement content seems to be positively correlated with strength.
+
+#Goal
+Use an ensemble of neural networks to predict strength of concrete.
+<br><br>
+Additionally, I will implement some global interpretability models in order to better understand how the neural network is making predictions.
+<br><br>
+Esnembling multiple high-variance/low-bias (overfit) models will allow our aggregated model to lower variance while retaining low bias. I will ensemble through bootstrapping and random variable selection.
+
+#Data Processing
+I will split the data 80/20 train/test. Additionally, scaled data will allow numerical stability and gradient descent to converge faster.
+```{r}
+#rename data for easier use
+data=concrete
+colnames(data) = c("x1","x2","x3","x4","x5","x6","x7","x8","y")
+#train/test split
+set.seed(1)
+size_train = sample(1:nrow(data), size=nrow(data)*0.8, replace=FALSE)
+train = data[size_train,]
+test = data[-size_train,]
+#scaling train/test to mean 0 and sd 1
+train_scale = as.data.frame(scale(train))
+test_scale = as.data.frame(scale(test)) 
+```
+
+#Modeling
+Each model will be built on a bootstrapped data set (sample with replacement from the original data set). Additionally, we will randomly select 3 out of the 8 possible predictors for each model.
+<br><br>
+```{r}
+####boot strapped
+model_boot = list()
+number_of_networks = 7
+for (i in 1:number_of_networks) {
+set.seed(i)
+#create bootstrapped sample
+boot = sample(1:nrow(train),nrow(train),replace = TRUE)
+#select participating varibles to build nn
+var = sample(1:(ncol(train)-1), 3 , replace = FALSE)
+#create training set for this iteration including variables chosen from above and the response
+train_boot = train_scale[boot,c(var,9)] #column 9 is response
+outcome <- "y" 
+variables <- colnames(train_boot)[-4] #y (response) is the fourth element of vector
+f <- as.formula(paste(outcome, paste(variables, collapse = " + "), sep = " ~ "))
+model_boot[[i]]=neuralnet::neuralnet(f,data=train_boot,hidden = c(2,2), startweights = NULL, act.fct = 'logistic', stepmax = 1e6, linear.output=TRUE, learningrate = 0.005)}
+```
+
+#Predictions
+Since our response (strength) is numeric, I will take the average of all predictions from the models as the final prediction. Additionally, I will back-transform to compute the MSE on the unstandardized scale.
+<br><br>
+Additionally, we can examine how bagging allows for high variance models to combine predictions to create a more accurate prediction.
+```{r}
+#calculate test set predictions for each model
+predictions = as.data.frame(matrix(0,ncol = number_of_networks,nrow = nrow(test_scale)))
+for (i in 1:number_of_networks) {
+  predictions[,i] = predict(model_boot[[i]], newdata = test_scale)
+}
+#ensemble all predictions together
+predictions$final = rowMeans(predictions)
+predictions$actual = test_scale$y
+
+#Examining difference between individual model predictions and ensembled predictions
+head(predictions[,1:9], 10)
+
+#Back transform to unstandardize
+predictions$final_unscaled = predictions$final * sd(test$y) + mean(test$y)
+predictions$actual_unscaled = predictions$actual* sd(test$y) + mean(test$y)
+
+#mse
+mse=round(sum((predictions$final_unscaled - predictions$actual_unscaled)**2)/nrow(predictions),digits=2)
+print(paste("Test set MSE is: ",mse))
+#rmse
+rmse=round(sqrt(sum((predictions$final_unscaled - predictions$actual_unscaled)**2)/nrow(predictions)),digits=2)
+print(paste("Test set RMSE is: ",rmse))
+#mae
+mae=round(sum(abs(predictions$final_unscaled - predictions$actual_unscaled))/nrow(predictions),digits=2)
+print(paste("Test set MAE is: ",mae))
+```
+
+#Surrogate Model
+A neural network is "black box" in the sense that while it can approximate any function, studying its structure won't give you any insights on the structure of the function being approximated. Therefore, interpretting **how** a neural network arrives at predictions can be quite difficult.
+<br><br>
+A global surrogate model is an interpretablility model that is trained to approximate the predictions of a black box model. We can draw conclusions about the black box model by interpreting the surrogate model.
+<br><br>
+The idea is to fit highly interpretable models (linear regressions, decision trees) using the regular predictors, in our case 8, as inputs. Except we will use the **predictions of the neural network** as the output, rather than the usual response, concrete strength.
+<br><br>
+With the R-squared measure, we can easily measure how good our surrogate models are in approximating the black box predictions.
+<br><br>
+Since this is a **global** surrogate model, we are trying to interpret how the neural network makes predictions globally, rather than just 1 particular prediction. A **local** surrogate model could be used to explain 1 single prediction.
+<br><br>
+$\textit{Note: We have to be aware that we are drawing conclusions about the model and not about the data, since the surrogate model never sees the real outcome.}$
+```{r}
+data_sur = test
+data_sur$predictions = predictions$final_unscaled
+colnames(data_sur) = c(colnames(concrete),"predictions")
+#decision tree surrogate
+model_sur = rpart(predictions~.-Strength,data=data_sur)
+print(paste("The R^2 for the decision tree is: ", round((cor(predict(model_sur,newdata = data_sur),data_sur$prediction)**2),digits=3))) #calculate R^2 for decision tree
+par(mfrow=c(1,1),xpd=NA,cex=0.5)
+plot(model_sur,uniform = T)
+text(model_sur)
+#linear regression surrogate
+model_sur_lin = lm(predictions~.-Strength,data=data_sur)
+summary(model_sur_lin)
+```
+We see high $R^{2}$ (above 80%) on both surrogate models. This suggests that we can explain roughly 80% of the predictive decision making of the neural networks using the surrogate models.
+<br><br>
+Additionally, the neural network views 'Cement' as important as it chose to split on that variable first.
+<br><br>
+Judging by the significance of each regressor and the sign of the coefficent, all regressors contribute positively to the increase in predicted strength by the neural network. In other words, holding other variables constant and increase a variable by 1 unit, increases the **predicted response (strength)** by the neural network.
+
+#Conclusions
+Due to computational limitations from training a multilayer neural network, I could not cross-validate nor resample the training/test data. Additionally, the number of layers/units I could use was quite limited. However, in the future (with access to a more powerful computer) I would be interested in cross validating the ensemble to tune hyperparameters such as: number of hidden units, number of hidden layers, learning rate, and momentum while also increasing the number of networks.
+<br><br>
+The ensemble of neural networks allows civil engineers to predict concrete strength with reasonably accuracy. Additionally, the surrogate models allow civil engineers to better understand the neural network and present (a proportion) of the model's predictive process to stakeholders when making decision about concrete. Also, we can see which variables are contributing to an increase or decrease in concrete strength.
+
+#Resources
+- Kaggle for Data
+- "Interpretable Machine Learning - A Guide for Making Black Box Models Explainable." by Christoph Molnar
